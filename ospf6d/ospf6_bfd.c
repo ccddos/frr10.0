@@ -26,6 +26,7 @@
 #include "ospf6_route.h"
 #include "ospf6_zebra.h"
 #include "ospf6_bfd.h"
+#include "ospf6_bfd_enhanced.h"
 
 /*
  * ospf6_bfd_trigger_event - Neighbor is registered/deregistered with BFD when
@@ -55,12 +56,19 @@ void ospf6_bfd_trigger_event(struct ospf6_neighbor *on, int old_state,
 		if (memcmp(&on->linklocal_addr, &dst, sizeof(dst))) {
 			bfd_sess_set_ipv6_addrs(on->bfd_session, &src,
 						&on->linklocal_addr);
+			if (IS_OSPF6_DEBUG_BFD)
+				ospf6_bfd_log_event(on, "BFD session address updated");
 		}
 
 		bfd_sess_install(on->bfd_session);
+		if (IS_OSPF6_DEBUG_BFD)
+			ospf6_bfd_log_event(on, "BFD session installed");
 	} else if (old_state >= OSPF6_NEIGHBOR_TWOWAY
-		   && state < OSPF6_NEIGHBOR_TWOWAY)
+		   && state < OSPF6_NEIGHBOR_TWOWAY) {
 		bfd_sess_uninstall(on->bfd_session);
+		if (IS_OSPF6_DEBUG_BFD)
+			ospf6_bfd_log_event(on, "BFD session uninstalled");
+	}
 }
 
 /*
@@ -101,8 +109,15 @@ static void ospf6_bfd_callback(struct bfd_session_params *bsp,
 {
 	struct ospf6_neighbor *on = arg;
 
+	/* Enhanced logging */
+	if (IS_OSPF6_DEBUG_BFD) {
+		ospf6_bfd_log_event(on, bss->state == BFD_STATUS_DOWN ? 
+				   "BFD session DOWN" : "BFD session UP");
+	}
+
 	if (bss->state == BFD_STATUS_DOWN
 	    && bss->previous_state == BFD_STATUS_UP) {
+		ospf6_bfd_log_event(on, "Triggering neighbor inactivity timer");
 		event_cancel(&on->inactivity_timer);
 		event_add_event(master, inactivity_timer, on, 0, NULL);
 	}
@@ -117,8 +132,18 @@ void ospf6_bfd_info_nbr_create(struct ospf6_interface *oi,
 	if (!oi->bfd_config.enabled)
 		return;
 
-	if (on->bfd_session == NULL)
+	/* Validate BFD configuration */
+	if (!ospf6_bfd_config_validate(oi)) {
+		zlog_warn("OSPFv3 BFD: Invalid configuration on interface %s, BFD disabled",
+			  oi->interface->name);
+		return;
+	}
+
+	if (on->bfd_session == NULL) {
 		on->bfd_session = bfd_sess_new(ospf6_bfd_callback, on);
+		if (IS_OSPF6_DEBUG_BFD)
+			ospf6_bfd_log_event(on, "BFD session created");
+	}
 
 	bfd_sess_set_timers(on->bfd_session,
 			    oi->bfd_config.detection_multiplier,
@@ -285,4 +310,7 @@ void ospf6_bfd_init(void)
 	install_element(INTERFACE_NODE, &ipv6_ospf6_bfd_param_cmd);
 	install_element(INTERFACE_NODE, &no_ipv6_ospf6_bfd_profile_cmd);
 	install_element(INTERFACE_NODE, &no_ipv6_ospf6_bfd_cmd);
+
+	/* Initialize enhanced BFD functions */
+	ospf6_bfd_enhanced_init();
 }
